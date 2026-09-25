@@ -1,7 +1,7 @@
 /* report.js - รายงานกำกับติดตามการจัดซื้อ: สรุปตามแผน · รายงานขออนุมัติซื้อรายวัน/ช่วงวัน + ส่งออก Excel + พิมพ์ */
 const Report = {
   _view: null, _mode: 'plan', _cat: '', _data: null,
-  _from: '', _to: '', _preset: 'fy',
+  _from: '', _to: '', _preset: 'fy', _selectedPlanIds: new Set(), _loadSeq: 0,
 
   async render(view) {
     this._view = view;
@@ -41,7 +41,7 @@ const Report = {
     }));
     document.getElementById('rpCat').addEventListener('change', e => { this._cat = e.target.value; this.load(); });
     document.getElementById('rpXlsx').addEventListener('click', () =>
-      this.exportXlsx(isBuy ? 'purchase' : 'result', App.fiscalYear, this._cat, this._from, this._to));
+      isBuy ? this.exportXlsx('purchase', App.fiscalYear, this._cat, this._from, this._to) : this.exportSelectedPlan());
     document.getElementById('rpPrint').addEventListener('click', () => this.print());
 
     if (isBuy) this.bindDateFilter();
@@ -120,14 +120,77 @@ const Report = {
 
   async load() {
     const box = document.getElementById('rpBody');
+    const seq = ++this._loadSeq;
+    this._data = null;
     box.innerHTML = App.loader();
     const r = await api('getReport', {
       fiscal_year: App.fiscalYear, category_id: this._cat, mode: this._mode,
       from: this._from, to: this._to
     }).catch(() => null);
+    if (seq !== this._loadSeq) return;
     if (!r || r.status !== 'success') { box.innerHTML = '<div class="hint">โหลดข้อมูลไม่ได้</div>'; return; }
     this._data = r;
+    if (this._mode === 'plan') {
+      this._selectedPlanIds = new Set((r.groups || []).flatMap(g => g.rows.map(x => String(x.id))));
+    }
     box.innerHTML = this._mode === 'purchase' ? this.purchaseHtml(r) : this.planHtml(r);
+    if (this._mode === 'plan') this.bindPlanSelection(box);
+  },
+
+  bindPlanSelection(box) {
+    const checks = Array.from(box.querySelectorAll('[data-plan-select]'));
+    const all = box.querySelector('#rpSelectAll');
+    const count = box.querySelector('#rpSelectedCount');
+    const selectedTotal = box.querySelector('#rpSelectedTotal');
+    if (!all) return;
+    const sync = () => {
+      const selected = checks.filter(c => c.checked).length;
+      count.textContent = 'เลือก ' + selected + ' / ' + checks.length + ' รายการ สำหรับพิมพ์และส่งออก';
+      const groups = this.selectedPlanGroups();
+      const planAmount = groups.reduce((s, g) => s + g.amount_plan, 0);
+      const usedAmount = groups.reduce((s, g) => s + g.used_amount, 0);
+      selectedTotal.textContent = 'รายการที่เลือก: วงเงินแผน ' + money(planAmount) +
+        ' · ซื้อจริง ' + money(usedAmount) + ' · คงเหลือ ' + money(planAmount - usedAmount);
+      all.checked = selected === checks.length;
+      all.indeterminate = selected > 0 && selected < checks.length;
+    };
+    all.addEventListener('change', () => {
+      checks.forEach(c => {
+        c.checked = all.checked;
+        if (c.checked) this._selectedPlanIds.add(c.value);
+        else this._selectedPlanIds.delete(c.value);
+      });
+      sync();
+    });
+    checks.forEach(c => c.addEventListener('change', () => {
+      if (c.checked) this._selectedPlanIds.add(c.value);
+      else this._selectedPlanIds.delete(c.value);
+      sync();
+    }));
+    sync();
+  },
+
+  selectedPlanGroups() {
+    const groups = (this._data.groups || []).map(g => {
+      const rows = g.rows.filter(x => this._selectedPlanIds.has(String(x.id)));
+      return { ...g, rows,
+        amount_plan: rows.reduce((s, x) => s + Number(x.amount_plan || 0), 0),
+        used_amount: rows.reduce((s, x) => s + Number(x.used_amount || 0), 0) };
+    }).filter(g => g.rows.length);
+    groups.forEach(g => { g.remain_amount = g.amount_plan - g.used_amount; });
+    return groups;
+  },
+
+  purchaseDateCell(x) {
+    const dates = (x.purchase_dates || []).map(d => App.esc(fmtDate(d))).join(', ');
+    const details = x.purchase_details || [];
+    if (!details.length) return '-';
+    return `<details class="rep-purchases"><summary>${dates || 'ดูรายการซื้อ'} (${details.length})</summary>
+      ${details.map(p => {
+        const mismatch = p.unit_price > 0 && Math.abs(Math.round(p.qty * p.unit_price * 100) / 100 - p.amount) > 0.01;
+        return `<div>${App.esc(fmtDate(p.date))} · ${qty(p.qty)} ${App.esc(x.unit || '')} × ${money(p.unit_price)} บาท = ${money(p.amount)} บาท${p.doc_no ? ' · ' + App.esc(p.doc_no) : ''}${mismatch ? ' <strong class="is-over">ยอดไม่ตรงกับจำนวน × ราคา</strong>' : ''}</div>`;
+      }).join('')}
+    </details>`;
   },
 
   /* ---------------- โหมดสรุปตามแผน ---------------- */
@@ -144,6 +207,12 @@ const Report = {
         ${triStat(t.amount_plan, t.used_amount, t.remain_amount)}
       </div>
 
+      <div class="rep-selection">
+        <label><input type="checkbox" id="rpSelectAll" checked> เลือกทั้งหมด</label>
+        <span id="rpSelectedCount"></span>
+        <span id="rpSelectedTotal"></span>
+      </div>
+
       ${r.groups.map(g => `
         <div class="rep-group">
           <div class="rep-head" style="border-left-color:${g.color}">
@@ -156,7 +225,8 @@ const Report = {
           <div class="ur-table-wrap">
             <table class="ur-table">
               <thead><tr>
-                <th style="width:34px">#</th><th>รหัส</th><th>รายการ</th><th>หน่วย</th>
+                <th class="rep-select-col" style="width:36px">เลือก</th>
+                <th style="width:34px">#</th><th>รหัส</th><th>รายการ</th><th>หน่วย</th><th>วันที่สั่งซื้อ</th>
                 <th>จำนวนแผน</th><th>วงเงินแผน</th>
                 <th>ซื้อแล้ว</th><th>วงเงินซื้อ</th>
                 <th>คงเหลือ</th><th>วงเงินคงเหลือ</th>
@@ -164,10 +234,12 @@ const Report = {
               <tbody>${g.rows.map((x, i) => {
                 const over = x.remain_amount < 0 || x.remain_qty < 0;
                 return `<tr class="${over ? 'row-over' : ''}">
+                  <td class="urt-c rep-select-col"><input type="checkbox" data-plan-select value="${App.esc(String(x.id))}" checked aria-label="เลือก ${App.esc(x.name)}"></td>
                   <td class="urt-n">${i + 1}</td>
                   <td class="urt-c">${App.esc(x.code)}</td>
                   <td>${App.esc(x.name)}</td>
                   <td class="urt-c">${App.esc(x.unit || '-')}</td>
+                  <td class="urt-c">${this.purchaseDateCell(x)}</td>
                   <td class="urt-c num">${qty(x.qty_plan)}</td>
                   <td class="urt-c num">${money(x.amount_plan)}</td>
                   <td class="urt-c num">${qty(x.used_qty)}</td>
@@ -177,7 +249,7 @@ const Report = {
                 </tr>`;
               }).join('')}
               <tr class="row-sum">
-                <td colspan="5" class="urt-bold">รวม ${g.rows.length} รายการ</td>
+                <td colspan="7" class="urt-bold">รวม ${g.rows.length} รายการ</td>
                 <td class="urt-c num urt-bold">${money(g.amount_plan)}</td>
                 <td></td>
                 <td class="urt-c num urt-bold">${money(g.used_amount)}</td>
@@ -241,7 +313,7 @@ const Report = {
       <div class="ur-table-wrap">
         <table class="ur-table">
           <thead><tr>
-            <th style="width:34px">#</th><th>วันที่</th><th>ประเภทแผน</th><th>รหัส</th><th>รายการ</th>
+            <th style="width:34px">#</th><th>วันที่สั่งซื้อ</th><th>ประเภทแผน</th><th>รหัส</th><th>รายการ</th>
             <th>จำนวน</th><th>ราคา/หน่วย</th><th>วงเงิน</th><th>ผู้ขาย</th><th>เลขที่เอกสาร</th>
           </tr></thead>
           <tbody>${list.map((x, i) => `
@@ -268,6 +340,26 @@ const Report = {
   },
 
   /* ---------------- ส่งออก Excel ---------------- */
+  exportSelectedPlan() {
+    if (!this._data) { App.toast('ยังไม่มีข้อมูล', 'err'); return; }
+    const rows = this.selectedPlanGroups().flatMap(g => g.rows);
+    if (!rows.length) { App.toast('กรุณาเลือกรายการก่อนส่งออก', 'err'); return; }
+    const columns = ['ประเภทแผน', 'รหัสรายการ', 'ชื่อรายการ', 'หน่วยนับ', 'วันที่สั่งซื้อ',
+      'จำนวนตามแผน', 'วงเงินตามแผน', 'จำนวนที่ขอซื้อ', 'วงเงินที่ขอซื้อ',
+      'จำนวนคงเหลือ', 'วงเงินคงเหลือ', 'ใช้ไป (%)'];
+    const aoa = [columns].concat(rows.map(x => [
+      x.category_name, x.code, x.name, x.unit,
+      (x.purchase_dates || []).join(', '), x.qty_plan, x.amount_plan,
+      x.used_qty, x.used_amount, x.remain_qty, x.remain_amount, x.pct
+    ]));
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = columns.map((c, i) => ({ wch: i === 2 ? 36 : Math.max(14, String(c).length + 4) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'ผลตามแผน');
+    XLSX.writeFile(wb, 'TheWatcher_ผลตามแผน_ปีงบ' + this._data.fiscal_year + '.xlsx');
+    App.toast('ส่งออก ' + rows.length + ' รายการแล้ว', 'ok');
+  },
+
   async exportXlsx(kind, fiscalYear, categoryId, from, to) {
     App.showLoading('กำลังเตรียมไฟล์');
     try {
@@ -298,14 +390,47 @@ const Report = {
     if (!this._data) { App.toast('ยังไม่มีข้อมูล', 'err'); return; }
     if (this._mode === 'purchase') { this.printPurchase(); return; }
 
-    const body = document.getElementById('rpBody');
-    const title = (this._data.hospital_name || App.branding.hospital_name || '') +
-      ' · รายงานผลการจัดซื้อตามแผน ปีงบประมาณ พ.ศ. ' + this._data.fiscal_year +
-      (this._cat ? ' · ' + Master.catName(this._cat) : '');
-    this.openPrintWindow(title, `
-      <h1>${App.esc(title)}</h1>
-      <div class="sub">พิมพ์เมื่อ ${new Date().toLocaleString('th-TH')}</div>
-      ${body.innerHTML}`);
+    const r = this._data;
+    const groups = this.selectedPlanGroups();
+    if (!groups.length) { App.toast('กรุณาเลือกรายการก่อนพิมพ์', 'err'); return; }
+    const org = r.hospital_name || App.branding.hospital_name || '';
+    const title = 'รายงานผลการจัดซื้อตามแผน ปีงบประมาณ พ.ศ. ' + r.fiscal_year;
+    const planAmount = groups.reduce((s, g) => s + g.amount_plan, 0);
+    const usedAmount = groups.reduce((s, g) => s + g.used_amount, 0);
+    this.openPrintWindow(org + ' - ' + title, `
+      <div class="doc-head">
+        ${App.branding.logo_url ? `<img class="doc-logo" src="${App.esc(App.branding.logo_url)}" alt="">` : ''}
+        <div><div class="doc-org">${App.esc(org)}</div><h1>${App.esc(title)}</h1>
+          <div class="sub">ประเภทแผน: ${App.esc(this._cat ? Master.catName(this._cat) : 'ทุกประเภทแผน')}</div></div>
+      </div>
+      <div class="doc-summary">รวม ${groups.reduce((s, g) => s + g.rows.length, 0)} รายการ · แผน ${money(planAmount)} · ซื้อแล้ว ${money(usedAmount)} · คงเหลือ ${money(planAmount - usedAmount)}</div>
+      ${groups.map(g => `
+        <div class="rep-title">${App.esc(g.name)}</div>
+        <div class="hint">แผน ${money(g.amount_plan)} · ซื้อแล้ว ${money(g.used_amount)} · คงเหลือ ${money(g.remain_amount)}</div>
+        <table class="ur-table"><thead><tr>
+          <th style="width:28px">#</th><th>รหัส</th><th>รายการ</th><th>หน่วย</th><th>วันที่สั่งซื้อ</th>
+          <th>จำนวนแผน</th><th>วงเงินแผน</th><th>ซื้อแล้ว</th><th>วงเงินซื้อ</th><th>คงเหลือ</th><th>วงเงินคงเหลือ</th>
+        </tr></thead><tbody>
+          ${g.rows.map((x, i) => `<tr class="${x.remain_amount < 0 || x.remain_qty < 0 ? 'row-over' : ''}">
+            <td class="c">${i + 1}</td><td class="c">${App.esc(x.code)}</td><td>${App.esc(x.name)}</td>
+            <td class="c">${App.esc(x.unit || '-')}</td>
+            <td class="c">${(x.purchase_dates || []).map(d => App.esc(fmtDate(d))).join(', ') || '-'}</td>
+            <td class="c">${qty(x.qty_plan)}</td><td class="r">${money(x.amount_plan)}</td>
+            <td class="c">${qty(x.used_qty)}</td><td class="r">${money(x.used_amount)}</td>
+            <td class="c">${qty(x.remain_qty)}</td><td class="r b">${money(x.remain_amount)}</td>
+          </tr>`).join('')}
+          <tr class="sum"><td colspan="6">รวม ${g.rows.length} รายการ</td><td class="r">${money(g.amount_plan)}</td>
+            <td></td><td class="r">${money(g.used_amount)}</td><td></td><td class="r">${money(g.remain_amount)}</td></tr>
+        </tbody></table>`).join('')}
+      ${this.planSignatureHtml()}
+      <div class="sub" style="margin-top:14px">พิมพ์เมื่อ ${new Date().toLocaleString('th-TH')}</div>`);
+  },
+
+  planSignatureHtml() {
+    return `<div class="plan-signs">
+      <div><div>ลงชื่อ <span class="sign-blank"></span> ผู้สั่ง</div><div>วันที่ <span class="sign-date"></span></div></div>
+      <div><div>ลงชื่อ <span class="sign-blank"></span> ผู้ตรวจ</div><div>วันที่ <span class="sign-date"></span></div></div>
+    </div>`;
   },
 
   /* เอกสารรายงานขออนุมัติซื้อ (จัดหน้าเอง ไม่ก๊อปจากหน้าจอ) */
@@ -367,7 +492,7 @@ const Report = {
       <div class="sec-title">รายละเอียดรายการที่ขออนุมัติซื้อ</div>
       <table>
         <thead><tr>
-          <th style="width:32px">ที่</th><th style="width:78px">วันที่</th><th>ประเภทแผน</th>
+          <th style="width:32px">ที่</th><th style="width:78px">วันที่สั่งซื้อ</th><th>ประเภทแผน</th>
           <th style="width:86px">รหัส</th><th>รายการ</th><th style="width:78px">จำนวน</th>
           <th style="width:82px">ราคา/หน่วย</th><th style="width:92px">วงเงิน</th>
           <th style="width:110px">ผู้ขาย</th><th style="width:86px">เลขที่เอกสาร</th>
@@ -413,6 +538,11 @@ const Report = {
         tr.sum td{background:#f2f2f2;font-weight:700}
         tr.over td{background:#ffeced}
         .baht{text-align:right;font-weight:700;margin:4px 0 2px;font-size:12.5px}
+        .doc-summary{font-weight:700;margin:0 0 12px}
+        .plan-signs{display:flex;justify-content:space-between;gap:36px;margin:55px 18px 0;font-size:14px}
+        .plan-signs>div{width:42%;line-height:2.5;white-space:nowrap}
+        .sign-blank,.sign-date{display:inline-block;border-bottom:1px solid #333;vertical-align:middle;width:52%;height:18px}
+        .sign-date{width:65%}
         .signs{display:flex;justify-content:space-between;gap:24px;margin-top:52px;text-align:center;font-size:12px}
         .signs>div{flex:1 1 0}
         .signs .line{border-bottom:1px dotted #333;margin:0 12px 7px;height:34px}

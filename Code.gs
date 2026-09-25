@@ -885,6 +885,8 @@ function decoratePlanRow_(r, usedMap, cats) {
     used_qty: u.qty,
     used_amount: u.amount,
     purchase_count: u.count,
+    purchase_dates: u.dates || [],
+    purchase_details: u.details || [],
     remain_qty: round2_(qtyPlan - u.qty),
     remain_amount: round2_(amtPlan - u.amount),
     pct: amtPlan > 0 ? Math.min(100, round2_(u.amount * 100 / amtPlan)) : 0,
@@ -915,14 +917,20 @@ function purchaseTotalsByPlan_(fy) {
     .filter(function (r) { return normalizeFiscalYear_(r.fiscal_year) === fy; })
     .forEach(function (r) {
       var k = r.plan_id || '';
-      if (!map[k]) map[k] = { qty: 0, amount: 0, count: 0 };
+      if (!map[k]) map[k] = { qty: 0, amount: 0, count: 0, dates: [], details: [] };
       map[k].qty += num_(r.qty);
       map[k].amount += num_(r.amount);
       map[k].count += 1;
+      var date = String(r.date || '').slice(0, 10);
+      if (date && map[k].dates.indexOf(date) === -1) map[k].dates.push(date);
+      map[k].details.push({ date: date, qty: num_(r.qty), unit_price: num_(r.unit_price),
+        amount: num_(r.amount), doc_no: r.doc_no || '' });
     });
   Object.keys(map).forEach(function (k) {
     map[k].qty = round2_(map[k].qty);
     map[k].amount = round2_(map[k].amount);
+    map[k].dates.sort();
+    map[k].details.sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
   });
   return map;
 }
@@ -1397,7 +1405,7 @@ function apiExportData_(p) {
 
   if (kind === 'purchase') {
     label = 'ขออนุมัติซื้อ';
-    columns = ['วันที่', 'ประเภทแผน', 'รหัสรายการ', 'ชื่อรายการ', 'หน่วยนับ', 'จำนวนที่ขอซื้อ', 'ราคาต่อหน่วย', 'วงเงินที่ขอซื้อ', 'ผู้ขาย', 'เลขที่เอกสาร', 'เกินแผน', 'บันทึกโดย'];
+    columns = ['วันที่สั่งซื้อ', 'ประเภทแผน', 'รหัสรายการ', 'ชื่อรายการ', 'หน่วยนับ', 'จำนวนที่ขอซื้อ', 'ราคาต่อหน่วย', 'วงเงินที่ขอซื้อ', 'ผู้ขาย', 'เลขที่เอกสาร', 'เกินแผน', 'บันทึกโดย'];
     var pd = apiGetPurchases_({ fiscal_year: fy, category_id: catId, limit: 10000, from: p.from, to: p.to });
     pd.data.slice().sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).forEach(function (r) {
       rows.push([r.date, r.category_name, r.code, r.name, r.unit, r.qty, r.unit_price, r.amount, r.vendor, r.doc_no, r.over_plan ? 'เกินแผน' : '', r.by]);

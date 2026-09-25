@@ -939,6 +939,16 @@ body {
 .rep-pct { font-weight: 700; color: var(--brand-strong); font-size: 1.1rem; flex: none; }
 .ur-table tr.row-sum td { background: var(--brand-soft); font-weight: 700; }
 .ur-table tr.row-over td { background: var(--coral-soft); }
+.rep-selection {
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px 16px;
+  margin:16px 2px 12px; color:var(--muted); font-size:.9rem;
+}
+.rep-selection label { display:inline-flex; align-items:center; gap:8px; color:var(--ink); font-weight:600; cursor:pointer; }
+.rep-selection input, .rep-select-col input { width:18px; height:18px; accent-color:var(--brand); cursor:pointer; }
+.rep-select-col { text-align:center; }
+.rep-purchases { text-align:left; min-width:120px; }
+.rep-purchases summary { cursor:pointer; color:var(--brand-strong); }
+.rep-purchases div { white-space:nowrap; padding:4px 0; color:var(--ink); font-size:.82rem; }
 
 /* กริดตัวเลือกไอคอนกว้างขึ้นเล็กน้อยบนจอใหญ่ */
 @media (min-width: 900px) {

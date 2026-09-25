@@ -50,7 +50,7 @@ const Purchase = {
         </div>
 
         <div class="field">
-          <label>เลขที่เอกสาร / วันที่</label>
+          <label>เลขที่เอกสาร / วันที่สั่งซื้อ</label>
           <div class="d-flex gap-2">
             <input type="text" id="puDoc" autocomplete="off" placeholder="เลขที่เอกสาร" style="flex:1">
             <input type="date" id="puDate" class="date-inp" style="flex:none">
